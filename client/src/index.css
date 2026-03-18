@@ -1,0 +1,38 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 40 10% 8%;
+  --foreground: 40 3% 80%;
+  --card: 40 9% 10%;
+  --card-foreground: 40 3% 80%;
+  --popover: 40 9% 10%;
+  --popover-foreground: 40 3% 80%;
+  --primary: 188 35% 47%;
+  --primary-foreground: 40 10% 8%;
+  --secondary: 40 8% 12%;
+  --secondary-foreground: 40 3% 70%;
+  --muted: 40 8% 15%;
+  --muted-foreground: 40 2% 47%;
+  --accent: 188 35% 47%;
+  --accent-foreground: 40 10% 8%;
+  --destructive: 320 47% 60%;
+  --destructive-foreground: 40 3% 90%;
+  --border: 40 3% 22%;
+  --input: 40 8% 12%;
+  --ring: 188 35% 47%;
+  --radius: 0.5rem;
+}
+
+* { box-sizing: border-box; }
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #171614;
+  color: #cdccca;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+.tabular-nums { font-variant-numeric: tabular-nums; }
