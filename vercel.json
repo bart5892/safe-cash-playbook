@@ -1,7 +1,13 @@
 {
   "buildCommand": "npx vite build",
   "outputDirectory": "dist/public",
+  "functions": {
+    "api/dashboard.mjs": { "maxDuration": 30 },
+    "api/health.mjs":    { "maxDuration": 10 }
+  },
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    { "source": "/api/dashboard", "destination": "/api/dashboard" },
+    { "source": "/api/health",    "destination": "/api/health" },
+    { "source": "/((?!api/).*)",  "destination": "/index.html" }
   ]
 }
