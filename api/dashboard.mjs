@@ -133,12 +133,13 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
 
   try {
-    const [crypto, vixData, sp500Data, treasury, sofrData] = await Promise.allSettled([
+    const [crypto, vixData, sp500Data, treasury, sofrData, basisData] = await Promise.allSettled([
       fetchCryptoPrices(),
       fetchYahooQuote("^VIX"),
       fetchYahooQuote("^GSPC"),
       fetchTreasuryYieldCurve(),
       fetchSOFR(),
+      fetchFuturesBasis(),
     ]);
 
     const btcPrice = crypto.status === "fulfilled" ? crypto.value.btcPrice : 72000;
@@ -168,18 +169,23 @@ export default async function handler(req, res) {
     const sofr     = sofrData.status === "fulfilled" ? sofrData.value.rate  : 3.65;
     const sofrDate = sofrData.status === "fulfilled" ? sofrData.value.date  : "";
 
-    const btcBasis = 8.2;
-    const ethBasis = 6.5;
+    // Live basis from Crypto.com quarterly futures
+    const basisLive   = basisData.status === "fulfilled" ? basisData.value : null;
+    const btcBasis    = basisLive?.btcBasis ?? null;
+    const ethBasis    = basisLive?.ethBasis ?? null;
+    const basisExpiry = basisLive?.basisExpiry ?? "Jun 26, 2026";
+    const btcFutPrice = basisLive?.btcFutures ?? null;
+    const ethFutPrice = basisLive?.ethFutures ?? null;
 
     const today      = new Date();
     const month      = today.getMonth() + 1;
     const day        = today.getDate();
     const isFomcWeek = FOMC_DATES_2026.some(([m, d]) => m === month && Math.abs(d - day) <= 1);
-    const regime     = { ...detectRegime(vix, btcBasis, sofr, isFomcWeek), isFomcWeek };
+    const regime     = { ...detectRegime(vix, btcBasis ?? 0, sofr, isFomcWeek), isFomcWeek };
 
     const strategies = [
-      { name: "BTC Basis Carry (3M)",   type: "Crypto Carry",   targetYield: btcBasis, vsSofr: +(btcBasis - sofr).toFixed(2), risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
-      { name: "ETH Basis Carry (3M)",   type: "Crypto Carry",   targetYield: ethBasis, vsSofr: +(ethBasis - sofr).toFixed(2), risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
+      { name: "BTC Basis Carry (3M)",   type: "Crypto Carry",   targetYield: btcBasis, vsSofr: btcBasis !== null ? +(btcBasis - sofr).toFixed(2) : null, risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
+      { name: "ETH Basis Carry (3M)",   type: "Crypto Carry",   targetYield: ethBasis, vsSofr: ethBasis !== null ? +(ethBasis - sofr).toFixed(2) : null, risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
       { name: "Ladder Basis (1/4/12w)", type: "Curve Opt.",     targetYield: 8.75,     vsSofr: +(8.75 - sofr).toFixed(2),    risk: "Very Low", liquidity: "Medium",      status: "Active" },
       { name: "1-Month T-Bill (BIL)",   type: "Gov't Bond ETF", targetYield: yc["1M"], vsSofr: +(yc["1M"] - sofr).toFixed(2),risk: "Very Low", liquidity: "High",        status: "Active" },
       { name: "3-Month T-Bill (SHV)",   type: "Gov't Bond ETF", targetYield: yc["3M"], vsSofr: +(yc["3M"] - sofr).toFixed(2),risk: "Very Low", liquidity: "High",        status: "Active" },
