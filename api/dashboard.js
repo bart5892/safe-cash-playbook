@@ -34,6 +34,54 @@ async function fetchCryptoPrices() {
   };
 }
 
+// ── Crypto.com — live futures basis (3-month, annualised) ─────────────────────
+// Uses the June quarterly futures vs spot to compute real carry
+async function fetchFuturesBasis() {
+  // Crypto.com Exchange v1 public API — June 2026 quarterly futures vs spot
+  const BASE = "https://api.crypto.com/exchange/v1/public";
+
+  async function getQuote(instrument) {
+    const data = await fetchJSON(`${BASE}/get-tickers?instrument_name=${instrument}`);
+    const t = data?.result?.data?.[0] ?? {};
+    const bid  = parseFloat(t.b ?? 0);
+    const ask  = parseFloat(t.k ?? 0);
+    const last = parseFloat(t.a ?? 0);
+    const mid  = (bid > 0 && ask > 0) ? (bid + ask) / 2 : last;
+    return { mid, last };
+  }
+
+  const [btcSpotQ, btcFutQ, ethSpotQ, ethFutQ] = await Promise.all([
+    getQuote("BTC_USD"),
+    getQuote("BTCUSD-260626"),
+    getQuote("ETH_USD"),
+    getQuote("ETHUSD-260626"),
+  ]);
+
+  // Days to June 26 expiry
+  const today = new Date();
+  const expiry = new Date("2026-06-26");
+  const daysToExpiry = Math.max(1, Math.round((expiry - today) / 86400000));
+
+  function annualisedBasis(spot, futures) {
+    if (!spot || !futures) return null;
+    return ((futures - spot) / spot) * (365 / daysToExpiry) * 100;
+  }
+
+  const btcBasis = annualisedBasis(btcSpotQ.mid || btcSpotQ.last, btcFutQ.mid || btcFutQ.last);
+  const ethBasis = annualisedBasis(ethSpotQ.mid || ethSpotQ.last, ethFutQ.mid || ethFutQ.last);
+
+  return {
+    btcBasis:        btcBasis !== null ? +btcBasis.toFixed(2) : null,
+    ethBasis:        ethBasis !== null ? +ethBasis.toFixed(2) : null,
+    basisExpiry:     "Jun 26, 2026",
+    daysToExpiry,
+    btcSpot:         btcSpotQ.mid || btcSpotQ.last,
+    btcFutures:      btcFutQ.mid  || btcFutQ.last,
+    ethSpot:         ethSpotQ.mid || ethSpotQ.last,
+    ethFutures:      ethFutQ.mid  || ethFutQ.last,
+  };
+}
+
 async function fetchYahooQuote(symbol) {
   const encoded = encodeURIComponent(symbol);
   const data = await fetchJSON(
@@ -149,6 +197,7 @@ export default async function handler(req, res) {
         equities:  vixData.status   === "fulfilled" ? "Yahoo Finance" : "fallback",
         yieldCurve: treasury.status === "fulfilled" ? "US Treasury"  : "fallback",
         sofr:      sofrData.status  === "fulfilled" ? "NY Fed"       : "fallback",
+        basis:     basisData.status === "fulfilled" ? "Crypto.com"   : "fallback",
       },
       prices: {
         btc:   { price: btcPrice, pct: btcPct },
@@ -157,6 +206,9 @@ export default async function handler(req, res) {
         sp500: { price: sp500,    pct: sp500Pct },
         btcBasis,
         ethBasis,
+        btcFutPrice,
+        ethFutPrice,
+        basisExpiry,
       },
       rates: {
         sofr,

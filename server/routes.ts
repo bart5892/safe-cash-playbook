@@ -136,6 +136,58 @@ function detectRegime(vix: number, btcBasis: number, sofr: number, isFomcWeek: b
   };
 }
 
+// ── Crypto.com futures basis ─────────────────────────────────────────────────
+async function fetchFuturesBasis(): Promise<{
+  btcBasis: number | null;
+  ethBasis: number | null;
+  basisExpiry: string;
+  daysToExpiry: number;
+  btcFutPrice: number | null;
+  ethFutPrice: number | null;
+}> {
+  const BASE = "https://api.crypto.com/exchange/v1/public";
+
+  async function getQuote(instrument: string) {
+    const data = await fetchJSON(`${BASE}/get-tickers?instrument_name=${instrument}`);
+    const t = data?.result?.data?.[0] ?? {};
+    const bid  = parseFloat(t.b  ?? 0);
+    const ask  = parseFloat(t.k  ?? 0);
+    const last = parseFloat(t.a  ?? 0);
+    const mid  = (bid > 0 && ask > 0) ? (bid + ask) / 2 : last;
+    return { mid, last };
+  }
+
+  const [btcSpotQ, btcFutQ, ethSpotQ, ethFutQ] = await Promise.all([
+    getQuote("BTC_USD"),
+    getQuote("BTCUSD-260626"),
+    getQuote("ETH_USD"),
+    getQuote("ETHUSD-260626"),
+  ]);
+
+  const today      = new Date();
+  const expiry     = new Date("2026-06-26");
+  const daysToExpiry = Math.max(1, Math.round((expiry.getTime() - today.getTime()) / 86400000));
+
+  function annualisedBasis(spot: number, futures: number): number | null {
+    if (!spot || !futures) return null;
+    return +( ((futures - spot) / spot) * (365 / daysToExpiry) * 100 ).toFixed(2);
+  }
+
+  const btcSpot = btcSpotQ.mid || btcSpotQ.last;
+  const btcFut  = btcFutQ.mid  || btcFutQ.last;
+  const ethSpot = ethSpotQ.mid || ethSpotQ.last;
+  const ethFut  = ethFutQ.mid  || ethFutQ.last;
+
+  return {
+    btcBasis:     annualisedBasis(btcSpot, btcFut),
+    ethBasis:     annualisedBasis(ethSpot, ethFut),
+    basisExpiry:  "Jun 26, 2026",
+    daysToExpiry,
+    btcFutPrice:  btcFut  || null,
+    ethFutPrice:  ethFut  || null,
+  };
+}
+
 // ── Route registration ────────────────────────────────────────────────────────
 export function registerRoutes(httpServer: Server, app: Express) {
 
@@ -147,12 +199,13 @@ export function registerRoutes(httpServer: Server, app: Express) {
   app.get("/api/dashboard", async (req, res) => {
     try {
       // Fetch all data sources in parallel
-      const [crypto, vixData, sp500Data, treasury, sofrData] = await Promise.allSettled([
+      const [crypto, vixData, sp500Data, treasury, sofrData, basisData] = await Promise.allSettled([
         fetchCryptoprices(),
         fetchYahooQuote("^VIX"),
         fetchYahooQuote("^GSPC"),
         fetchTreasuryYieldCurve(),
         fetchSOFR(),
+        fetchFuturesBasis(),
       ]);
 
       // ── Crypto ────────────────────────────────────────────────────────────
@@ -186,22 +239,25 @@ export function registerRoutes(httpServer: Server, app: Express) {
       const sofr     = sofrData.status === "fulfilled" ? sofrData.value.rate : 3.65;
       const sofrDate = sofrData.status === "fulfilled" ? sofrData.value.date : "";
 
-      // ── Basis estimates (BTC/ETH perp funding → 3M annualized carry) ──────
-      // These are structural estimates from exchange funding rate data
-      const btcBasis = 8.2;
-      const ethBasis = 6.5;
+      // ── Live basis from Crypto.com quarterly futures ──────────────────────
+      const basisLive   = basisData.status === "fulfilled" ? basisData.value : null;
+      const btcBasis    = basisLive?.btcBasis ?? null;
+      const ethBasis    = basisLive?.ethBasis ?? null;
+      const basisExpiry = basisLive?.basisExpiry ?? "Jun 26, 2026";
+      const btcFutPrice = basisLive?.btcFutPrice ?? null;
+      const ethFutPrice = basisLive?.ethFutPrice ?? null;
 
       // ── Regime detection ──────────────────────────────────────────────────
       const today = new Date();
       const month = today.getMonth() + 1;
       const day   = today.getDate();
       const isFomcWeek = FOMC_DATES_2026.some(([m, d]) => m === month && Math.abs(d - day) <= 1);
-      const regime = { ...detectRegime(vix, btcBasis, sofr, isFomcWeek), isFomcWeek };
+      const regime = { ...detectRegime(vix, btcBasis ?? 0, sofr, isFomcWeek), isFomcWeek };
 
       // ── Strategies ────────────────────────────────────────────────────────
       const strategies = [
-        { name: "BTC Basis Carry (3M)",   type: "Crypto Carry",   targetYield: btcBasis,   vsSofr: +(btcBasis - sofr).toFixed(2),  risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
-        { name: "ETH Basis Carry (3M)",   type: "Crypto Carry",   targetYield: ethBasis,   vsSofr: +(ethBasis - sofr).toFixed(2),  risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
+        { name: "BTC Basis Carry (3M)",   type: "Crypto Carry",   targetYield: btcBasis, vsSofr: btcBasis !== null ? +(btcBasis - sofr).toFixed(2) : null, risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
+        { name: "ETH Basis Carry (3M)",   type: "Crypto Carry",   targetYield: ethBasis, vsSofr: ethBasis !== null ? +(ethBasis - sofr).toFixed(2) : null, risk: "Very Low", liquidity: "High (24/7)", status: "Active" },
         { name: "Ladder Basis (1/4/12w)", type: "Curve Opt.",     targetYield: 8.75,       vsSofr: +(8.75 - sofr).toFixed(2),     risk: "Very Low", liquidity: "Medium",     status: "Active" },
         { name: "1-Month T-Bill (BIL)",   type: "Gov't Bond ETF", targetYield: yc["1M"],   vsSofr: +(yc["1M"] - sofr).toFixed(2), risk: "Very Low", liquidity: "High",       status: "Active" },
         { name: "3-Month T-Bill (SHV)",   type: "Gov't Bond ETF", targetYield: yc["3M"],   vsSofr: +(yc["3M"] - sofr).toFixed(2), risk: "Very Low", liquidity: "High",       status: "Active" },
@@ -219,6 +275,7 @@ export function registerRoutes(httpServer: Server, app: Express) {
           equities:  vixData.status === "fulfilled" ? "Yahoo Finance" : "fallback",
           yieldCurve: treasury.status === "fulfilled" ? "US Treasury" : "fallback",
           sofr:      sofrData.status === "fulfilled" ? "NY Fed" : "fallback",
+          basis:     basisData.status === "fulfilled" ? "Crypto.com" : "fallback",
         },
         prices: {
           btc:  { price: btcPrice, pct: btcPct,  low: 0, high: 0 },
@@ -227,7 +284,11 @@ export function registerRoutes(httpServer: Server, app: Express) {
           sp500:{ price: sp500,    pct: sp500Pct },
           btcBasis,
           ethBasis,
+          btcFutPrice,
+          ethFutPrice,
+          basisExpiry,
         },
+
         rates: {
           sofr,
           fedFunds: 3.64,
