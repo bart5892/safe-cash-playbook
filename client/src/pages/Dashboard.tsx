@@ -3,7 +3,8 @@ import { apiRequest } from "@/lib/queryClient";
 import { useState, useEffect } from "react";
 import {
   TrendingUp, TrendingDown, Minus, RefreshCw, AlertTriangle,
-  Activity, DollarSign, BarChart2, Clock, Zap, ChevronUp, ChevronDown
+  Activity, DollarSign, BarChart2, Clock, Zap, ChevronDown, ChevronUp,
+  Target, BookOpen
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -15,14 +16,21 @@ interface DashboardData {
   fetchedAt: string;
   yieldCurveDate?: string;
   sofrDate?: string;
-  dataSources?: { crypto: string; equities: string; yieldCurve: string; sofr: string };
+  dataSources?: { crypto: string; equities: string; dxy?: string; yieldCurve: string; sofr: string; basis?: string };
   prices: {
     btc: { price: number; change: number; pct: number; low: number; high: number };
     eth: { price: number; change: number; pct: number; low: number; high: number };
     vix: { price: number; pct: number };
     sp500: { price: number; pct: number };
-    btcBasis: number;
-    ethBasis: number;
+    dxy: { price: number; pct: number };
+    btcBasis: number | null;
+    ethBasis: number | null;
+    btcSpotPrice: number | null;
+    ethSpotPrice: number | null;
+    btcFutPrice: number | null;
+    ethFutPrice: number | null;
+    basisExpiry: string;
+    daysToExpiry: number;
   };
   rates: {
     sofr: number; fedFunds: number; fedFundsTarget: string; primeRate: number;
@@ -191,10 +199,271 @@ const REGIME_ROWS = [
   { regime: "Dislocated Curve", condition: "CME vs Coinbase spread >1%", trade: "Venue Basis Arb", risk: "Very Low" },
 ];
 
+// ── Trade Structure Panel ─────────────────────────────────────────────────────
+// Calculates detailed structure for each active strategy based on $100k notional
+function TradeStructurePanel({ data }: { data: DashboardData }) {
+  const { prices, sofr, strategies } = data;
+  const NOTIONAL = 100_000;
+
+  const btcSpot  = prices.btcSpotPrice ?? prices.btc.price;
+  const ethSpot  = prices.ethSpotPrice ?? prices.eth.price;
+  const btcFut   = prices.btcFutPrice;
+  const ethFut   = prices.ethFutPrice;
+  const btcBasis = prices.btcBasis;
+  const ethBasis = prices.ethBasis;
+  const expiry   = prices.basisExpiry ?? "Jun 26, 2026";
+  const dte      = prices.daysToExpiry ?? 96;
+
+  // Active strategies from live data
+  const activeStrategies = strategies.filter(s => s.status === "Active");
+
+  // ── Per-strategy structure builder ──────────────────────────────────────
+  interface TradeStructure {
+    name: string;
+    signal: string;
+    type: string;
+    color: string;
+    legs: { label: string; value: string; note?: string }[];
+    notionalBreakdown: { label: string; value: string }[];
+    summary: string;
+  }
+
+  function buildBtcBasisStructure(): TradeStructure {
+    const carryPct = btcBasis ?? 0;
+    const annualIncome = NOTIONAL * (carryPct / 100);
+    const periodIncome = annualIncome * (dte / 365);
+    const btcUnits     = btcSpot > 0 ? (NOTIONAL / btcSpot) : 0;
+    const cashCollateral = NOTIONAL;
+
+    return {
+      name: "BTC Basis Carry (3M)",
+      signal: "Buy BTC Spot / Sell Jun Futures",
+      type: "Cash-and-Carry",
+      color: "teal",
+      legs: [
+        { label: "Leg 1 — Buy Spot",    value: `${btcUnits.toFixed(4)} BTC`, note: `@ $${fmt(btcSpot, 0)} spot` },
+        { label: "Leg 2 — Sell Futures", value: `${btcUnits.toFixed(4)} BTC futures`, note: `@ $${btcFut ? fmt(btcFut, 0) : "N/A"} · ${expiry}` },
+        { label: "DTE",                  value: `${dte} days` },
+        { label: "Annualised Basis",     value: `${carryPct.toFixed(2)}%`, note: `${(carryPct - sofr).toFixed(2)}% vs SOFR` },
+      ],
+      notionalBreakdown: [
+        { label: "Cash Deployed",     value: `$${fmt(cashCollateral, 0)}` },
+        { label: "Period Carry",      value: `~$${fmt(periodIncome, 0)} (${dte}d)` },
+        { label: "Annualised P&L",    value: `~$${fmt(annualIncome, 0)} / yr` },
+        { label: "BTC Units",         value: `${btcUnits.toFixed(4)} BTC` },
+      ],
+      summary: `Buy ${btcUnits.toFixed(4)} BTC spot at $${fmt(btcSpot, 0)}, simultaneously sell ${btcUnits.toFixed(4)} BTC Jun 26 futures at $${btcFut ? fmt(btcFut, 0) : "~"} locking in ~${carryPct.toFixed(2)}% annualised carry on $${fmt(cashCollateral, 0)} notional.`,
+    };
+  }
+
+  function buildEthBasisStructure(): TradeStructure {
+    const carryPct = ethBasis ?? 0;
+    const annualIncome = NOTIONAL * (carryPct / 100);
+    const periodIncome = annualIncome * (dte / 365);
+    const ethUnits     = ethSpot > 0 ? (NOTIONAL / ethSpot) : 0;
+
+    return {
+      name: "ETH Basis Carry (3M)",
+      signal: "Buy ETH Spot / Sell Jun Futures",
+      type: "Cash-and-Carry",
+      color: "teal",
+      legs: [
+        { label: "Leg 1 — Buy Spot",     value: `${ethUnits.toFixed(2)} ETH`,          note: `@ $${fmt(ethSpot, 0)} spot` },
+        { label: "Leg 2 — Sell Futures",  value: `${ethUnits.toFixed(2)} ETH futures`, note: `@ $${ethFut ? fmt(ethFut, 0) : "N/A"} · ${expiry}` },
+        { label: "DTE",                   value: `${dte} days` },
+        { label: "Annualised Basis",      value: `${carryPct.toFixed(2)}%`, note: `${(carryPct - sofr).toFixed(2)}% vs SOFR` },
+      ],
+      notionalBreakdown: [
+        { label: "Cash Deployed",  value: `$${fmt(NOTIONAL, 0)}` },
+        { label: "Period Carry",   value: `~$${fmt(periodIncome, 0)} (${dte}d)` },
+        { label: "Annualised P&L", value: `~$${fmt(annualIncome, 0)} / yr` },
+        { label: "ETH Units",      value: `${ethUnits.toFixed(2)} ETH` },
+      ],
+      summary: `Buy ${ethUnits.toFixed(2)} ETH spot at $${fmt(ethSpot, 0)}, sell ${ethUnits.toFixed(2)} ETH Jun 26 futures at $${ethFut ? fmt(ethFut, 0) : "~"} locking in ~${carryPct.toFixed(2)}% annualised carry on $${fmt(NOTIONAL, 0)} notional.`,
+    };
+  }
+
+  function buildCalendarCarryStructure(): TradeStructure {
+    // Calendar spread: sell 1-week ATM, buy 4-week ATM
+    // Typical structure: sell near-term vol premium, buy further vol for hedge
+    const atmStrikeBtc = Math.round(btcSpot / 1000) * 1000; // round to nearest $1k
+    const atmStrikeEth = Math.round(ethSpot / 10) * 10;       // round to nearest $10
+
+    // Target premium: ~2% of notional per month net (illustrative)
+    const grossPremiumEst = NOTIONAL * 0.018; // ~1.8% of notional collected upfront
+    const hedgeCostEst    = NOTIONAL * 0.008; // ~0.8% cost for long 4w leg
+    const netPremium      = grossPremiumEst - hedgeCostEst;
+    const maxProfit       = netPremium;
+    const maxLoss         = hedgeCostEst; // if 1w expires worthless and we close 4w at cost
+
+    const expiry1w = (() => {
+      const d = new Date(); d.setDate(d.getDate() + 7);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    })();
+    const expiry4w = (() => {
+      const d = new Date(); d.setDate(d.getDate() + 28);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    })();
+
+    return {
+      name: "Calendar Carry (1v4w)",
+      signal: "Sell 1-week ATM / Buy 4-week ATM",
+      type: "Options Calendar Spread",
+      color: "amber",
+      legs: [
+        { label: "Leg 1 — Sell Short",  value: `BTC $${fmt(atmStrikeBtc, 0)} Call (1w)`,  note: `Expiry: ${expiry1w}` },
+        { label: "Leg 2 — Buy Hedge",   value: `BTC $${fmt(atmStrikeBtc, 0)} Call (4w)`,  note: `Expiry: ${expiry4w}` },
+        { label: "Alt: ETH strikes",    value: `ETH $${fmt(atmStrikeEth, 0)} ATM`, note: "Same structure on ETH" },
+        { label: "IV Edge Target",      value: "Sell near > Buy far IV", note: "Positive theta trade" },
+      ],
+      notionalBreakdown: [
+        { label: "Gross Premium Rcvd",  value: `~$${fmt(grossPremiumEst, 0)}` },
+        { label: "Long Leg Cost",       value: `~$${fmt(hedgeCostEst, 0)}` },
+        { label: "Net Credit",          value: `~$${fmt(netPremium, 0)}` },
+        { label: "Max Profit",          value: `~$${fmt(maxProfit, 0)} (at expiry)` },
+        { label: "Max Loss",            value: `~$${fmt(maxLoss, 0)} (move through strike)` },
+      ],
+      summary: `Sell BTC $${fmt(atmStrikeBtc, 0)} ATM call expiring ${expiry1w}, buy same strike call expiring ${expiry4w}. Net ~$${fmt(netPremium, 0)} credit on $${fmt(NOTIONAL, 0)} notional. Profit if BTC stays near ATM over 7 days.`,
+    };
+  }
+
+  function buildPutCalendarStructure(): TradeStructure {
+    // Put calendar: sell 1w downside put, buy 4w same-strike put (net debit or small credit)
+    const atmStrikeBtc = Math.round(btcSpot / 1000) * 1000;
+    const ootmStrikeBtc = Math.round(btcSpot * 0.95 / 1000) * 1000; // 5% OTM put
+
+    const expiry1w = (() => {
+      const d = new Date(); d.setDate(d.getDate() + 7);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    })();
+    const expiry4w = (() => {
+      const d = new Date(); d.setDate(d.getDate() + 28);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    })();
+
+    const grossPremiumEst = NOTIONAL * 0.014;
+    const hedgeCostEst    = NOTIONAL * 0.006;
+    const netCredit       = grossPremiumEst - hedgeCostEst;
+
+    return {
+      name: "Put Calendar (ATM)",
+      signal: "Sell 1-week Put / Buy 4-week Put",
+      type: "Downside Calendar Spread",
+      color: "amber",
+      legs: [
+        { label: "Leg 1 — Sell Short",  value: `BTC $${fmt(ootmStrikeBtc, 0)} Put (1w)`,  note: `Strike ~5% OTM · Expiry ${expiry1w}` },
+        { label: "Leg 2 — Buy Hedge",   value: `BTC $${fmt(ootmStrikeBtc, 0)} Put (4w)`,  note: `Same strike · Expiry ${expiry4w}` },
+        { label: "ATM alternative",     value: `BTC $${fmt(atmStrikeBtc, 0)} Put`, note: "Higher premium but more delta" },
+        { label: "Skew Edge",           value: "Sell elevated near-term skew", note: "Put skew premium capture" },
+      ],
+      notionalBreakdown: [
+        { label: "Gross Premium Rcvd",  value: `~$${fmt(grossPremiumEst, 0)}` },
+        { label: "Long Leg Cost",       value: `~$${fmt(hedgeCostEst, 0)}` },
+        { label: "Net Credit",          value: `~$${fmt(netCredit, 0)}` },
+        { label: "Max Profit",          value: `~$${fmt(netCredit, 0)} if BTC stays above $${fmt(ootmStrikeBtc, 0)}` },
+        { label: "Max Loss",            value: `Limited to net debit if both legs expire worthless` },
+      ],
+      summary: `Sell BTC $${fmt(ootmStrikeBtc, 0)} put (5% OTM) expiring ${expiry1w}, buy same-strike put expiring ${expiry4w}. Net ~$${fmt(netCredit, 0)} credit. Profits from near-term put skew premium while long put provides tail hedge.`,
+    };
+  }
+
+  // Map active strategies to trade structures
+  const structures: TradeStructure[] = [];
+  for (const s of activeStrategies) {
+    if (s.name.includes("BTC Basis")) structures.push(buildBtcBasisStructure());
+    else if (s.name.includes("ETH Basis")) structures.push(buildEthBasisStructure());
+    else if (s.name.includes("Calendar Carry")) structures.push(buildCalendarCarryStructure());
+    else if (s.name.includes("Put Calendar")) structures.push(buildPutCalendarStructure());
+  }
+
+  if (structures.length === 0) {
+    return (
+      <div className="bg-[#1c1b19] border border-[#2a2927] rounded-lg p-6 text-center">
+        <p className="text-zinc-500 text-sm">No Active strategies with detailable structure at this time.</p>
+        <p className="text-zinc-600 text-xs mt-1">During FOMC weeks, options strategies are paused.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {structures.map((ts, idx) => {
+        const borderColor = ts.color === "teal" ? "border-teal-800/40" : "border-amber-800/40";
+        const bgColor     = ts.color === "teal" ? "bg-teal-950/20"     : "bg-amber-950/20";
+        const accentColor = ts.color === "teal" ? "text-teal-400"      : "text-amber-400";
+        const tagBg       = ts.color === "teal" ? "bg-teal-900/40 text-teal-300" : "bg-amber-900/40 text-amber-300";
+
+        return (
+          <div key={idx} className={`rounded-lg border ${borderColor} ${bgColor} overflow-hidden`}
+            data-testid={`trade-structure-${idx}`}>
+            {/* Structure header */}
+            <div className="px-4 py-3 border-b border-[#2a2927]/60 flex flex-col sm:flex-row sm:items-center gap-2">
+              <div className="flex items-center gap-2 flex-1">
+                <Target size={14} className={accentColor} />
+                <span className={`font-bold text-sm ${accentColor}`}>{ts.name}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${tagBg}`}>{ts.type}</span>
+              </div>
+              <div className="text-xs text-zinc-400 font-medium">{ts.signal}</div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-[#2a2927]/50">
+              {/* Trade legs */}
+              <div className="p-4">
+                <div className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-3 flex items-center gap-1.5">
+                  <BookOpen size={10} /> Trade Legs
+                </div>
+                <div className="space-y-2.5">
+                  {ts.legs.map((leg, li) => (
+                    <div key={li} className="flex items-start justify-between gap-3">
+                      <span className="text-xs text-zinc-500 shrink-0 mt-0.5 min-w-[120px]">{leg.label}</span>
+                      <div className="text-right">
+                        <span className={`text-sm font-semibold ${accentColor}`}>{leg.value}</span>
+                        {leg.note && <div className="text-xs text-zinc-600 mt-0">{leg.note}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Notional breakdown */}
+              <div className="p-4">
+                <div className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-3 flex items-center gap-1.5">
+                  <DollarSign size={10} /> $100k Notional Breakdown
+                </div>
+                <div className="space-y-2">
+                  {ts.notionalBreakdown.map((nb, ni) => (
+                    <div key={ni} className="flex items-center justify-between">
+                      <span className="text-xs text-zinc-500">{nb.label}</span>
+                      <span className="text-sm font-bold tabular-nums text-zinc-200">{nb.value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Summary */}
+            <div className="px-4 py-3 border-t border-[#2a2927]/60">
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                <span className="text-zinc-500 font-semibold">Structure: </span>{ts.summary}
+              </p>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Disclaimer */}
+      <p className="text-xs text-zinc-600 text-center leading-relaxed">
+        Premium estimates are indicative. Strikes shown are ATM/near-ATM based on live spot. Always verify with your exchange before executing. Not financial advice.
+      </p>
+    </div>
+  );
+}
+
 // ── Main Dashboard ─────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [lastRefresh, setLastRefresh] = useState<string>(new Date().toISOString());
   const [tick, setTick] = useState(0);
+  const [showTradeStructures, setShowTradeStructures] = useState(true);
 
   const { data, isLoading, isFetching, refetch, error } = useQuery<DashboardData>({
     queryKey: ["/api/dashboard"],
@@ -248,6 +517,7 @@ export default function Dashboard() {
 
   const d = data;
   const yc = d.yieldCurve;
+  const activeCount = d.strategies.filter(s => s.status === "Active").length;
 
   return (
     <div className="min-h-screen bg-[#171614] text-[#cdccca] font-sans">
@@ -295,14 +565,14 @@ export default function Dashboard() {
         {/* ── Regime Banner ── */}
         <RegimeBadge regime={d.regime} />
 
-        {/* ── Market Prices ── */}
+        {/* ── Market Conditions ── */}
         <section>
           <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3 flex items-center gap-2">
             <Activity size={12} /> Market Conditions — Live
           </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <PriceCard label="BTC / USD" price={d.prices.btc.price} pct={d.prices.btc.pct} low={d.prices.btc.low} high={d.prices.btc.high} currency="$" />
-            <PriceCard label="ETH / USD" price={d.prices.eth.price} pct={d.prices.eth.pct} low={d.prices.eth.low} high={d.prices.eth.high} currency="$" />
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
+            <PriceCard label="BTC / USD"  price={d.prices.btc.price}   pct={d.prices.btc.pct}   low={d.prices.btc.low}   high={d.prices.btc.high}   currency="$" />
+            <PriceCard label="ETH / USD"  price={d.prices.eth.price}   pct={d.prices.eth.pct}   low={d.prices.eth.low}   high={d.prices.eth.high}   currency="$" />
             <KpiCard label="VIX" value={d.prices.vix.price.toFixed(2)}
               sub={fmtPct(d.prices.vix.pct) + " today"}
               valueColor={d.prices.vix.price > 30 ? "text-rose-400" : d.prices.vix.price > 20 ? "text-amber-400" : "text-emerald-400"}
@@ -314,13 +584,26 @@ export default function Dashboard() {
               subColor={d.prices.sp500.pct >= 0 ? "text-emerald-500" : "text-rose-500"}
               icon={<TrendingUp size={14} />}
             />
-            <KpiCard label="BTC Basis (3M est.)" value={`~${d.prices.btcBasis.toFixed(1)}%`}
-              sub={`+${(d.prices.btcBasis - d.sofr).toFixed(1)}% vs SOFR`}
+            {/* DXY — Dollar Index */}
+            <KpiCard
+              label="DXY (USD Index)"
+              value={d.prices.dxy?.price ? fmt(d.prices.dxy.price, 2) : "—"}
+              sub={d.prices.dxy?.pct !== undefined ? fmtPct(d.prices.dxy.pct) + " today" : ""}
+              valueColor={
+                d.prices.dxy?.price > 105 ? "text-rose-400" :
+                d.prices.dxy?.price < 100 ? "text-emerald-400" :
+                "text-amber-400"
+              }
+              subColor={d.prices.dxy?.pct >= 0 ? "text-rose-500" : "text-emerald-500"}
+              icon={<DollarSign size={14} />}
+            />
+            <KpiCard label="BTC Basis (3M est.)" value={`~${d.prices.btcBasis?.toFixed(1) ?? "—"}%`}
+              sub={d.prices.btcBasis !== null ? `+${(d.prices.btcBasis - d.sofr).toFixed(1)}% vs SOFR` : "Live basis"}
               valueColor="text-teal-400" subColor="text-emerald-500"
               icon={<DollarSign size={14} />}
             />
-            <KpiCard label="ETH Basis (3M est.)" value={`~${d.prices.ethBasis.toFixed(1)}%`}
-              sub={`+${(d.prices.ethBasis - d.sofr).toFixed(1)}% vs SOFR`}
+            <KpiCard label="ETH Basis (3M est.)" value={`~${d.prices.ethBasis?.toFixed(1) ?? "—"}%`}
+              sub={d.prices.ethBasis !== null ? `+${(d.prices.ethBasis - d.sofr).toFixed(1)}% vs SOFR` : "Live basis"}
               valueColor="text-teal-400" subColor="text-emerald-500"
               icon={<DollarSign size={14} />}
             />
@@ -337,12 +620,12 @@ export default function Dashboard() {
             <div className="bg-[#1c1b19] border border-[#2a2927] rounded-lg divide-y divide-[#232220]">
               {[
                 { label: "★ SOFR (Benchmark)", value: `${d.rates.sofr.toFixed(2)}%`, note: "Overnight benchmark", highlight: true },
-                { label: "Fed Funds (Eff.)", value: `${d.rates.fedFunds.toFixed(2)}%`, note: `Target ${d.rates.fedFundsTarget}` },
-                { label: "1-Month T-Bill", value: `${yc["1M"]?.toFixed(2)}%`, note: `${fmtBps(yc["1M"] - d.rates.sofr)} vs SOFR` },
-                { label: "3-Month T-Bill", value: `${yc["3M"]?.toFixed(2)}%`, note: `${fmtBps(yc["3M"] - d.rates.sofr)} vs SOFR` },
-                { label: "2-Year Treasury", value: `${yc["2Y"]?.toFixed(2)}%`, note: `${fmtBps(yc["2Y"] - d.rates.sofr)} vs SOFR` },
-                { label: "10-Year Treasury", value: `${yc["10Y"]?.toFixed(2)}%`, note: `${fmtBps(yc["10Y"] - d.rates.sofr)} vs SOFR` },
-                { label: "Prime Rate", value: `${d.rates.primeRate.toFixed(2)}%`, note: "Fed Funds + 300bps" },
+                { label: "Fed Funds (Eff.)",  value: `${d.rates.fedFunds.toFixed(2)}%`, note: `Target ${d.rates.fedFundsTarget}` },
+                { label: "1-Month T-Bill",    value: `${yc["1M"]?.toFixed(2)}%`, note: `${fmtBps(yc["1M"] - d.rates.sofr)} vs SOFR` },
+                { label: "3-Month T-Bill",    value: `${yc["3M"]?.toFixed(2)}%`, note: `${fmtBps(yc["3M"] - d.rates.sofr)} vs SOFR` },
+                { label: "2-Year Treasury",   value: `${yc["2Y"]?.toFixed(2)}%`, note: `${fmtBps(yc["2Y"] - d.rates.sofr)} vs SOFR` },
+                { label: "10-Year Treasury",  value: `${yc["10Y"]?.toFixed(2)}%`, note: `${fmtBps(yc["10Y"] - d.rates.sofr)} vs SOFR` },
+                { label: "Prime Rate",        value: `${d.rates.primeRate.toFixed(2)}%`, note: "Fed Funds + 300bps" },
               ].map(({ label, value, note, highlight }) => (
                 <div key={label} className={`flex items-center justify-between px-4 py-2.5 ${highlight ? "bg-teal-950/20" : ""}`}>
                   <span className={`text-sm ${highlight ? "text-teal-300 font-semibold" : "text-zinc-400"}`}>{label}</span>
@@ -425,7 +708,7 @@ export default function Dashboard() {
                   {REGIME_ROWS.map((row, i) => {
                     const isActive = row.regime === d.regime.activeRegime ||
                       (row.trade === "Event Fade" && d.regime.isFomcWeek) ||
-                      (row.regime === "Steady Contango" && d.prices.btcBasis > 6);
+                      (row.regime === "Steady Contango" && (d.prices.btcBasis ?? 0) > 6);
                     const status = row.regime === d.regime.activeRegime && row.risk === d.regime.riskLevel
                       ? "🔴 ACTIVE"
                       : row.regime === "Event Fade" && d.regime.isFomcWeek
@@ -465,6 +748,36 @@ export default function Dashboard() {
                 </tbody>
               </table>
             </div>
+          </div>
+
+          {/* ── Trade Structures Panel (collapsible) ── */}
+          <div className="mt-4">
+            <button
+              onClick={() => setShowTradeStructures(v => !v)}
+              className="w-full flex items-center justify-between px-4 py-3 bg-[#1c1b19] border border-[#2a2927] rounded-lg hover:bg-[#201f1d] transition-colors group"
+              data-testid="button-trade-structures"
+            >
+              <div className="flex items-center gap-2">
+                <Target size={13} className="text-teal-400" />
+                <span className="text-sm font-semibold text-zinc-200">Active Trade Structures</span>
+                {activeCount > 0 && (
+                  <span className="bg-emerald-900/60 text-emerald-400 text-xs font-bold px-2 py-0.5 rounded-full">
+                    {activeCount} Active
+                  </span>
+                )}
+                <span className="text-xs text-zinc-600">— Detailed structure · strikes · expiries · $100k notional</span>
+              </div>
+              {showTradeStructures
+                ? <ChevronUp size={14} className="text-zinc-500 group-hover:text-zinc-400 transition-colors" />
+                : <ChevronDown size={14} className="text-zinc-500 group-hover:text-zinc-400 transition-colors" />
+              }
+            </button>
+
+            {showTradeStructures && (
+              <div className="mt-3">
+                <TradeStructurePanel data={d} />
+              </div>
+            )}
           </div>
         </section>
 
@@ -530,7 +843,7 @@ export default function Dashboard() {
         <footer className="border-t border-[#2a2927] pt-4 pb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
           <div className="text-xs text-zinc-600 space-y-0.5">
             <p>
-              Crypto: {d.dataSources?.crypto ?? "CoinGecko"} · Equities: {d.dataSources?.equities ?? "Yahoo Finance"} · Yields: {d.dataSources?.yieldCurve ?? "US Treasury"} · SOFR: {d.dataSources?.sofr ?? "NY Fed"}
+              Crypto: {d.dataSources?.crypto ?? "CoinGecko"} · Equities/DXY: {d.dataSources?.equities ?? "Yahoo Finance"} · Yields: {d.dataSources?.yieldCurve ?? "US Treasury"} · SOFR: {d.dataSources?.sofr ?? "NY Fed"} · Futures: {d.dataSources?.basis ?? "Crypto.com"}
             </p>
             <p>Auto-refreshes every 5 minutes · Last updated: {new Date(lastRefresh).toLocaleTimeString()}</p>
           </div>

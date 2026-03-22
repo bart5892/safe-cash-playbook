@@ -199,10 +199,11 @@ export function registerRoutes(httpServer: Server, app: Express) {
   app.get("/api/dashboard", async (req, res) => {
     try {
       // Fetch all data sources in parallel
-      const [crypto, vixData, sp500Data, treasury, sofrData, basisData] = await Promise.allSettled([
+      const [crypto, vixData, sp500Data, dxyData, treasury, sofrData, basisData] = await Promise.allSettled([
         fetchCryptoprices(),
         fetchYahooQuote("^VIX"),
         fetchYahooQuote("^GSPC"),
+        fetchYahooQuote("DX-Y.NYB"),
         fetchTreasuryYieldCurve(),
         fetchSOFR(),
         fetchFuturesBasis(),
@@ -219,6 +220,10 @@ export function registerRoutes(httpServer: Server, app: Express) {
       const vixPct  = vixData.status === "fulfilled" ? vixData.value.pct : 0;
       const sp500   = sp500Data.status === "fulfilled" ? sp500Data.value.price : 6700;
       const sp500Pct = sp500Data.status === "fulfilled" ? sp500Data.value.pct : 0;
+
+      // ── DXY (US Dollar Index) ─────────────────────────────────────────────
+      const dxy    = dxyData.status === "fulfilled" ? dxyData.value.price : 104;
+      const dxyPct = dxyData.status === "fulfilled" ? dxyData.value.pct   : 0;
 
       // ── Yield curve ───────────────────────────────────────────────────────
       const ycRaw = treasury.status === "fulfilled" ? treasury.value.yields : {};
@@ -240,12 +245,15 @@ export function registerRoutes(httpServer: Server, app: Express) {
       const sofrDate = sofrData.status === "fulfilled" ? sofrData.value.date : "";
 
       // ── Live basis from Crypto.com quarterly futures ──────────────────────
-      const basisLive   = basisData.status === "fulfilled" ? basisData.value : null;
-      const btcBasis    = basisLive?.btcBasis ?? null;
-      const ethBasis    = basisLive?.ethBasis ?? null;
-      const basisExpiry = basisLive?.basisExpiry ?? "Jun 26, 2026";
-      const btcFutPrice = basisLive?.btcFutPrice ?? null;
-      const ethFutPrice = basisLive?.ethFutPrice ?? null;
+      const basisLive    = basisData.status === "fulfilled" ? basisData.value : null;
+      const btcBasis     = basisLive?.btcBasis ?? null;
+      const ethBasis     = basisLive?.ethBasis ?? null;
+      const basisExpiry  = basisLive?.basisExpiry ?? "Jun 26, 2026";
+      const daysToExpiry = basisLive?.daysToExpiry ?? 96;
+      const btcSpotPrice = basisLive?.btcSpot ?? null;
+      const ethSpotPrice = basisLive?.ethSpot ?? null;
+      const btcFutPrice  = basisLive?.btcFutPrice ?? null;
+      const ethFutPrice  = basisLive?.ethFutPrice ?? null;
 
       // ── Regime detection ──────────────────────────────────────────────────
       const today = new Date();
@@ -271,22 +279,27 @@ export function registerRoutes(httpServer: Server, app: Express) {
         yieldCurveDate: ycDate,
         sofrDate,
         dataSources: {
-          crypto:    crypto.status === "fulfilled" ? "CoinGecko" : "fallback",
-          equities:  vixData.status === "fulfilled" ? "Yahoo Finance" : "fallback",
-          yieldCurve: treasury.status === "fulfilled" ? "US Treasury" : "fallback",
-          sofr:      sofrData.status === "fulfilled" ? "NY Fed" : "fallback",
-          basis:     basisData.status === "fulfilled" ? "Crypto.com" : "fallback",
+          crypto:    crypto.status    === "fulfilled" ? "CoinGecko"    : "fallback",
+          equities:  vixData.status   === "fulfilled" ? "Yahoo Finance" : "fallback",
+          dxy:       dxyData.status   === "fulfilled" ? "Yahoo Finance" : "fallback",
+          yieldCurve: treasury.status === "fulfilled" ? "US Treasury"  : "fallback",
+          sofr:      sofrData.status  === "fulfilled" ? "NY Fed"       : "fallback",
+          basis:     basisData.status === "fulfilled" ? "Crypto.com"   : "fallback",
         },
         prices: {
           btc:  { price: btcPrice, pct: btcPct,  low: 0, high: 0 },
           eth:  { price: ethPrice, pct: ethPct,  low: 0, high: 0 },
           vix:  { price: vix,      pct: vixPct },
           sp500:{ price: sp500,    pct: sp500Pct },
+          dxy:  { price: dxy,      pct: dxyPct },
           btcBasis,
           ethBasis,
+          btcSpotPrice,
+          ethSpotPrice,
           btcFutPrice,
           ethFutPrice,
           basisExpiry,
+          daysToExpiry,
         },
 
         rates: {

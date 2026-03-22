@@ -133,10 +133,11 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
 
   try {
-    const [crypto, vixData, sp500Data, treasury, sofrData, basisData] = await Promise.allSettled([
+    const [crypto, vixData, sp500Data, dxyData, treasury, sofrData, basisData] = await Promise.allSettled([
       fetchCryptoPrices(),
       fetchYahooQuote("^VIX"),
       fetchYahooQuote("^GSPC"),
+      fetchYahooQuote("DX-Y.NYB"),
       fetchTreasuryYieldCurve(),
       fetchSOFR(),
       fetchFuturesBasis(),
@@ -151,6 +152,8 @@ export default async function handler(req, res) {
     const vixPct   = vixData.status === "fulfilled" ? vixData.value.pct    : 0;
     const sp500    = sp500Data.status === "fulfilled" ? sp500Data.value.price : 6700;
     const sp500Pct = sp500Data.status === "fulfilled" ? sp500Data.value.pct   : 0;
+    const dxy      = dxyData.status  === "fulfilled" ? dxyData.value.price  : 104;
+    const dxyPct   = dxyData.status  === "fulfilled" ? dxyData.value.pct    : 0;
 
     const ycRaw    = treasury.status === "fulfilled" ? treasury.value.yields : {};
     const ycDate   = treasury.status === "fulfilled" ? treasury.value.date   : "N/A";
@@ -174,6 +177,9 @@ export default async function handler(req, res) {
     const btcBasis    = basisLive?.btcBasis ?? null;
     const ethBasis    = basisLive?.ethBasis ?? null;
     const basisExpiry = basisLive?.basisExpiry ?? "Jun 26, 2026";
+    const daysToExpiry = basisLive?.daysToExpiry ?? 96;
+    const btcSpotPrice = basisLive?.btcSpot ?? null;
+    const ethSpotPrice = basisLive?.ethSpot ?? null;
     const btcFutPrice = basisLive?.btcFutures ?? null;
     const ethFutPrice = basisLive?.ethFutures ?? null;
 
@@ -201,6 +207,7 @@ export default async function handler(req, res) {
       dataSources: {
         crypto:    crypto.status    === "fulfilled" ? "CoinGecko"    : "fallback",
         equities:  vixData.status   === "fulfilled" ? "Yahoo Finance" : "fallback",
+        dxy:       dxyData.status   === "fulfilled" ? "Yahoo Finance" : "fallback",
         yieldCurve: treasury.status === "fulfilled" ? "US Treasury"  : "fallback",
         sofr:      sofrData.status  === "fulfilled" ? "NY Fed"       : "fallback",
         basis:     basisData.status === "fulfilled" ? "Crypto.com"   : "fallback",
@@ -210,11 +217,15 @@ export default async function handler(req, res) {
         eth:   { price: ethPrice, pct: ethPct },
         vix:   { price: vix,      pct: vixPct },
         sp500: { price: sp500,    pct: sp500Pct },
+        dxy:   { price: dxy,      pct: dxyPct },
         btcBasis,
         ethBasis,
+        btcSpotPrice,
+        ethSpotPrice,
         btcFutPrice,
         ethFutPrice,
         basisExpiry,
+        daysToExpiry,
       },
       rates: {
         sofr,
